@@ -99,7 +99,13 @@ NAME_OVERRIDES = {
 # The sidebar lets you enter your own code. You can find it with the
 # "Find non-country codes" button.
 EURO_AREA_LABEL = "Euro area"
-EURO_AREA_CODES = ("EA",)
+EURO_AREA_CODES = ("G163",)
+# Other codes to try for the Euro area exchange rate.
+EURO_AREA_ER_FALLBACKS = ("U2", "EA", "EUR")
+
+# Key templates. The Euro area CPI uses HICP instead of CPI.
+CPI_KEY_TEMPLATES = ("{code}.CPI._T.IX.M", "{code}.HICP._T.IX.M")
+ER_KEY_TEMPLATES = ("{code}.XDC_USD.PA_RT.M",)
 
 # The U.S. CPI for October 2025 is missing in the IMF data.
 # For the U.S. only, the app fills it with the average of September and
@@ -221,25 +227,34 @@ def _fetch_one(flow: str, key: str) -> pd.Series:
     raise FetchError("\n".join(errors))
 
 
-def _fetch_with_codes(flow: str, template: str, codes: tuple[str, ...]) -> pd.Series:
+def _fetch_with_codes(
+    flow: str, templates: tuple[str, ...], codes: tuple[str, ...]
+) -> pd.Series:
+    """Try every code and every key template until one returns data."""
     failures: list[str] = []
     for code in codes:
-        try:
-            return _fetch_one(flow, template.format(code=code))
-        except FetchError as exc:
-            failures.append(f"[{code}] {exc}")
+        for template in templates:
+            try:
+                return _fetch_one(flow, template.format(code=code))
+            except FetchError as exc:
+                failures.append(f"[{code} | {template}] {exc}")
     raise FetchError(f"No data for {flow} with codes {codes}.\n" + "\n".join(failures))
 
 
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def load_country(codes: tuple[str, ...]) -> pd.DataFrame:
     """Return monthly CPI and XDC per USD for one economy (since 1976-01)."""
-    cpi = _fetch_with_codes(CPI_FLOW, "{code}.CPI._T.IX.M", codes)
+    # The Euro area CPI uses the index type HICP (key G163.HICP._T.IX.M).
+    cpi = _fetch_with_codes(CPI_FLOW, CPI_KEY_TEMPLATES, codes)
     if codes == ("USA",):
         # The U.S. dollar per U.S. dollar rate is always 1.
         xdc_usd = pd.Series(1.0, index=cpi.index)
     else:
-        xdc_usd = _fetch_with_codes(ER_FLOW, "{code}.XDC_USD.PA_RT.M", codes)
+        er_codes = codes
+        if codes[0] not in ISO3_CODES:
+            # Euro area: the exchange-rate dataset may use another code.
+            er_codes = tuple(dict.fromkeys(codes + EURO_AREA_ER_FALLBACKS))
+        xdc_usd = _fetch_with_codes(ER_FLOW, ER_KEY_TEMPLATES, er_codes)
     cpi_imputed = pd.Series(False, index=cpi.index)
     if codes == ("USA",) and US_GAP_MONTH not in cpi.index:
         if US_GAP_BEFORE in cpi.index and US_GAP_AFTER in cpi.index:

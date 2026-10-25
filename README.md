@@ -44,6 +44,7 @@ streamlit run app.py
 - The version must be `~` (latest).
 - CPI key: `{CODE}.CPI._T.IX.M` (dataflow `IMF.STA,CPI`)
 - Exchange-rate key: `{CODE}.XDC_USD.PA_RT.M` (dataflow `IMF.STA,ER`)
+- Euro area CPI key: `G163.HICP._T.IX.M`
 - Request header: `Accept: text/csv`
 - Monthly periods look like `2024-M01`.
 
@@ -53,7 +54,11 @@ The app caches each download for 24 hours.
 
 ## Euro area code
 
-The app uses the IMF code `EA` for the Euro area. To use another code, enter it in the sidebar box **IMF code (optional)**. The app tries it first. The button **Find non-country codes** lists the non-ISO3 codes in the IMF CPI data.
+The IMF code for the Euro area is `G163`. Its CPI series uses the index type `HICP` (Harmonised Index of Consumer Prices), not `CPI`. The CPI key is `G163.HICP._T.IX.M`. The app tries the `CPI` key first, then the `HICP` key.
+
+For the exchange rate, the app tries `G163` first. It then tries `U2`, `EA` and `EUR`.
+
+To use another code, enter it in the sidebar box **IMF code (optional)**. The app tries it first. The button **Find non-country codes** lists the non-ISO3 codes in the IMF CPI data.
 
 ## U.S. October 2025 CPI
 
