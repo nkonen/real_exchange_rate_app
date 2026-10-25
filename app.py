@@ -34,27 +34,20 @@ AGENCY = "IMF.STA"
 CPI_FLOW = "CPI"  # key: {code}.CPI._T.IX.M
 ER_FLOW = "ER"  # key: {code}.XDC_USD.PA_RT.M
 START_FLOOR = pd.Timestamp("1976-01-01")
-TIMEOUT_SECONDS = 60
+TIMEOUT_SECONDS = 90
 
+# IMF SDMX 3.0 data URL:  /3.0/data/dataflow/{agency}/{flow}/{version}/{key}
+# - The version must be "~" (latest). "+" and "*" can return errors.
+# - Monthly periods look like 2024-M01.
+# - A wrong code returns HTTP 200 with no rows. It does not return an error.
 # Each tuple is (URL template, Accept header). The app tries them in order.
-# {flow} is the dataflow ID. {key} is the series key.
+_V3 = API_ROOT + "/3.0/data/dataflow/" + AGENCY + "/{flow}/~/{key}"
+_V21 = API_ROOT + "/2.1/data/" + AGENCY + ",{flow}/{key}"
 REQUEST_VARIANTS = [
-    (
-        API_ROOT + "/3.0/data/dataflow/" + AGENCY + "/{flow}/+/{key}",
-        "application/vnd.sdmx.data+csv;version=2.0.0",
-    ),
-    (
-        API_ROOT + "/3.0/data/dataflow/" + AGENCY + "/{flow}/+/{key}",
-        "application/vnd.sdmx.data+json;version=2.0.0",
-    ),
-    (
-        API_ROOT + "/2.1/data/" + AGENCY + ",{flow}/{key}",
-        "application/vnd.sdmx.data+csv;version=1.0.0",
-    ),
-    (
-        API_ROOT + "/2.1/data/" + AGENCY + ",{flow}/{key}",
-        "application/vnd.sdmx.data+json;version=1.0.0",
-    ),
+    (_V3 + "?c[TIME_PERIOD]=ge:1976-M01", "text/csv"),
+    (_V3, "text/csv"),
+    (_V3 + "?c[TIME_PERIOD]=ge:1976-M01", "application/json"),
+    (_V21 + "?startPeriod=1976-01", "application/vnd.sdmx.data+csv;version=1.0.0"),
 ]
 
 # IMF member countries and other economies with IMF statistics (ISO3 codes).
@@ -101,10 +94,12 @@ NAME_OVERRIDES = {
     "USA": "United States",
 }
 
-# The IMF code for the euro area can differ between datasets.
+# The IMF code for the euro area is not an ISO3 code.
 # The app tries each code in order and uses the first one that returns data.
+# The sidebar lets you enter your own code. You can find it with the
+# "Find non-country codes" button.
 EURO_AREA_LABEL = "Euro area"
-EURO_AREA_CODES = ("G163", "U2", "EA", "EUR")
+EURO_AREA_CODES = ("G163", "U2", "EA", "EA20", "EA19", "EMU", "EUR")
 
 
 class FetchError(Exception):
@@ -121,12 +116,12 @@ def _country_name(iso3: str) -> str:
     return record.name if record else iso3
 
 
-def build_country_options() -> dict[str, tuple[str, ...]]:
+def build_country_options(euro_codes: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
     """Map a display label to the tuple of candidate IMF codes."""
     options: dict[str, tuple[str, ...]] = {
         _country_name(code) + f" ({code})": (code,) for code in ISO3_CODES
     }
-    options[EURO_AREA_LABEL] = EURO_AREA_CODES
+    options[EURO_AREA_LABEL] = euro_codes
     return dict(sorted(options.items(), key=lambda item: item[0].lower()))
 
 
@@ -144,13 +139,31 @@ def _period_to_timestamp(period: str) -> pd.Timestamp | None:
     return pd.Timestamp(year=year, month=month, day=1)
 
 
+def _read_csv_frame(text: str) -> pd.DataFrame:
+    frame = pd.read_csv(io.StringIO(text), low_memory=False)
+    frame.columns = [str(c).strip() for c in frame.columns]
+    return frame
+
+
+def _find_column(frame: pd.DataFrame, name: str) -> str | None:
+    """Find a column by name. Ignore case and an optional ':label' suffix."""
+    for column in frame.columns:
+        if column.upper().split(":")[0].strip() == name:
+            return column
+    return None
+
+
 def _parse_csv(text: str) -> pd.Series:
-    frame = pd.read_csv(io.StringIO(text))
-    columns = {c.upper(): c for c in frame.columns}
-    if "TIME_PERIOD" not in columns or "OBS_VALUE" not in columns:
-        raise FetchError("CSV response has no TIME_PERIOD or OBS_VALUE column.")
-    periods = frame[columns["TIME_PERIOD"]].map(_period_to_timestamp)
-    values = pd.to_numeric(frame[columns["OBS_VALUE"]], errors="coerce")
+    frame = _read_csv_frame(text)
+    time_col = _find_column(frame, "TIME_PERIOD")
+    value_col = _find_column(frame, "OBS_VALUE")
+    if time_col is None or value_col is None:
+        raise FetchError(
+            "CSV has no TIME_PERIOD or OBS_VALUE column. "
+            f"Columns found: {list(frame.columns)[:8]}"
+        )
+    periods = frame[time_col].map(_period_to_timestamp)
+    values = pd.to_numeric(frame[value_col], errors="coerce")
     series = pd.Series(values.to_numpy(), index=periods).dropna()
     series = series[series.index.notna()]
     return series[~series.index.duplicated(keep="first")]
@@ -161,11 +174,8 @@ def _parse_json(payload: dict) -> pd.Series:
     structures = data.get("structures") or [data.get("structure")]
     structure = structures[0]
     time_values = structure["dimensions"]["observation"][0]["values"]
-    periods = [
-        v.get("id") or v.get("value") or v.get("name") for v in time_values
-    ]
-    datasets = data["dataSets"]
-    series_map = datasets[0].get("series", {})
+    periods = [v.get("id") or v.get("value") or v.get("name") for v in time_values]
+    series_map = data["dataSets"][0].get("series", {})
     if not series_map:
         raise FetchError("JSON response has no series.")
     first_series = next(iter(series_map.values()))
@@ -187,31 +197,31 @@ def _fetch_one(flow: str, key: str) -> pd.Series:
                 url, headers={"Accept": accept}, timeout=TIMEOUT_SECONDS
             )
             if response.status_code != 200:
-                errors.append(f"HTTP {response.status_code} for {url}")
+                errors.append(f"HTTP {response.status_code}: {url}")
                 continue
             content_type = response.headers.get("Content-Type", "").lower()
-            if "json" in content_type:
+            if "json" in content_type or response.text.lstrip().startswith("{"):
                 series = _parse_json(response.json())
             else:
                 series = _parse_csv(response.text)
             if series.empty:
-                errors.append(f"Empty series from {url}")
+                errors.append(f"HTTP 200 but no data rows: {url}")
                 continue
             return series.sort_index()
         except (requests.RequestException, ValueError, KeyError, IndexError,
-                TypeError, FetchError) as exc:
-            errors.append(f"{type(exc).__name__}: {exc} ({url})")
-    raise FetchError("; ".join(errors[-4:]))
+                TypeError, FetchError, pd.errors.ParserError) as exc:
+            errors.append(f"{type(exc).__name__}: {exc} | {url}")
+    raise FetchError("\n".join(errors))
 
 
 def _fetch_with_codes(flow: str, template: str, codes: tuple[str, ...]) -> pd.Series:
-    last_error: Exception | None = None
+    failures: list[str] = []
     for code in codes:
         try:
             return _fetch_one(flow, template.format(code=code))
         except FetchError as exc:
-            last_error = exc
-    raise FetchError(f"No data for codes {codes}. Last error: {last_error}")
+            failures.append(f"[{code}] {exc}")
+    raise FetchError(f"No data for {flow} with codes {codes}.\n" + "\n".join(failures))
 
 
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
@@ -225,6 +235,22 @@ def load_country(codes: tuple[str, ...]) -> pd.DataFrame:
         xdc_usd = _fetch_with_codes(ER_FLOW, "{code}.XDC_USD.PA_RT.M", codes)
     frame = pd.concat({"cpi": cpi, "xdc_usd": xdc_usd}, axis=1).sort_index()
     return frame[frame.index >= START_FLOOR]
+
+
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def discover_extra_codes(flow: str, tail: str) -> list[str]:
+    """List codes in a dataflow that are not ISO3 countries (e.g. aggregates)."""
+    url = f"{API_ROOT}/3.0/data/dataflow/{AGENCY}/{flow}/~/*.{tail}"
+    url += "?c[TIME_PERIOD]=ge:2024-M01"
+    response = requests.get(url, headers={"Accept": "text/csv"}, timeout=TIMEOUT_SECONDS)
+    if response.status_code != 200:
+        raise FetchError(f"HTTP {response.status_code}: {url}")
+    frame = _read_csv_frame(response.text)
+    column = _find_column(frame, "COUNTRY") or _find_column(frame, "REF_AREA")
+    if column is None:
+        raise FetchError(f"No COUNTRY column. Columns found: {list(frame.columns)[:8]}")
+    codes = {str(v).split(":")[0].strip() for v in frame[column].dropna().unique()}
+    return sorted(codes - set(ISO3_CODES))
 
 
 # --------------------------------------------------------------------------
@@ -314,6 +340,30 @@ def make_chart(data: pd.DataFrame, mode: str, label1: str, label2: str) -> go.Fi
 # --------------------------------------------------------------------------
 # User interface
 # --------------------------------------------------------------------------
+def sidebar_euro_codes() -> tuple[str, ...]:
+    """Sidebar controls for the Euro area code. Return the codes to try."""
+    st.sidebar.header("Euro area code")
+    st.sidebar.write(
+        "The IMF code for the Euro area is not an ISO3 code. "
+        "Enter your own code to try it first."
+    )
+    custom = st.sidebar.text_input("IMF code (optional)", value="").strip().upper()
+    if st.sidebar.button("Find non-country codes"):
+        try:
+            with st.spinner("Asking the IMF API..."):
+                extra = discover_extra_codes(CPI_FLOW, "CPI._T.IX.M")
+            if extra:
+                st.sidebar.write("Codes in the IMF CPI data that are not ISO3 countries:")
+                st.sidebar.code(", ".join(extra))
+            else:
+                st.sidebar.warning("No extra codes found.")
+        except (FetchError, requests.RequestException) as exc:
+            st.sidebar.error("The code search failed.")
+            st.sidebar.code(str(exc))
+    codes = tuple(dict.fromkeys(([custom] if custom else []) + list(EURO_AREA_CODES)))
+    return codes
+
+
 def main() -> None:
     st.set_page_config(page_title="Real Exchange Rate Explorer", layout="wide")
     st.title("Real Exchange Rate Explorer")
@@ -323,10 +373,11 @@ def main() -> None:
         "S(t) is units of country 2 currency per 1 unit of country 1 currency."
     )
 
-    options = build_country_options()
+    euro_codes = sidebar_euro_codes()
+    options = build_country_options(euro_codes)
     labels = list(options)
     default1 = labels.index("United States (USA)")
-    default2 = labels.index(EURO_AREA_LABEL)
+    default2 = labels.index("Germany (DEU)")
 
     col1, col2, col3 = st.columns([1, 1, 1])
     with col1:
@@ -349,7 +400,7 @@ def main() -> None:
             "The IMF API did not return the data. "
             "Select other countries or try again later."
         )
-        with st.expander("Technical details"):
+        with st.expander("Technical details", expanded=True):
             st.code(str(exc))
         st.stop()
 

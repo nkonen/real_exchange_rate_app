@@ -40,18 +40,32 @@ streamlit run app.py
 ## Data source
 
 - API root: `https://api.imf.org/external/sdmx/3.0`
+- URL pattern: `/data/dataflow/IMF.STA/{flow}/~/{key}?c[TIME_PERIOD]=ge:1976-M01`
+- The version must be `~` (latest).
 - CPI key: `{CODE}.CPI._T.IX.M` (dataflow `IMF.STA,CPI`)
 - Exchange-rate key: `{CODE}.XDC_USD.PA_RT.M` (dataflow `IMF.STA,ER`)
+- Request header: `Accept: text/csv`
+- Monthly periods look like `2024-M01`.
+
+A wrong code returns HTTP 200 with no rows. The app treats this as "no data" and shows the URL.
 
 The app caches each download for 24 hours.
 
+## Euro area code
+
+The IMF code for the Euro area is not an ISO3 code. The app tries `G163`, `U2`, `EA`, `EA20`, `EA19`, `EMU` and `EUR` in order.
+
+If none works:
+1. Open the sidebar and click **Find non-country codes**. The app lists the non-ISO3 codes in the IMF CPI data.
+2. Enter the Euro area code in **IMF code (optional)**. The app tries it first.
+3. Optional: edit `EURO_AREA_CODES` in `app.py`.
+
 ## Notes
 
-- The IMF code for the Euro area can differ between datasets. The app tries `G163`, `U2`, `EA` and `EUR` in order. Edit `EURO_AREA_CODES` in `app.py` if needed.
-- The app tries four request formats (SDMX 3.0 and 2.1, CSV and JSON). If the IMF changes its API, edit `REQUEST_VARIANTS` in `app.py`.
+- The app tries four request formats. If the IMF changes its API, edit `REQUEST_VARIANTS` in `app.py`.
 - Some countries do not have CPI or exchange-rate data for all months. The chart shows gaps for those months.
 - Different CPI base years do not affect the real index. RER* removes the base-year level.
-- The app uses the IMF dataflow IDs `CPI` and `ER` under agency `IMF.STA`. Check these IDs if a request fails.
+- The default selection is United States and Germany. Select Euro area after you confirm the code.
 
 ## Files
 
