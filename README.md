@@ -53,19 +53,18 @@ The app caches each download for 24 hours.
 
 ## Euro area code
 
-The IMF code for the Euro area is not an ISO3 code. The app tries `G163`, `U2`, `EA`, `EA20`, `EA19`, `EMU` and `EUR` in order.
+The app uses the IMF code `EA` for the Euro area. To use another code, enter it in the sidebar box **IMF code (optional)**. The app tries it first. The button **Find non-country codes** lists the non-ISO3 codes in the IMF CPI data.
 
-If none works:
-1. Open the sidebar and click **Find non-country codes**. The app lists the non-ISO3 codes in the IMF CPI data.
-2. Enter the Euro area code in **IMF code (optional)**. The app tries it first.
-3. Optional: edit `EURO_AREA_CODES` in `app.py`.
+## U.S. October 2025 CPI
+
+The IMF data has no U.S. CPI for October 2025. For the United States only, the app sets this month to the average of September 2025 and November 2025. It does this only if the month is missing. The CSV marks the month in the `CPI_USA_imputed` column.
 
 ## Notes
 
 - The app tries four request formats. If the IMF changes its API, edit `REQUEST_VARIANTS` in `app.py`.
 - Some countries do not have CPI or exchange-rate data for all months. The chart shows gaps for those months.
 - Different CPI base years do not affect the real index. RER* removes the base-year level.
-- The default selection is United States and Germany. Select Euro area after you confirm the code.
+- The default selection is United States and Euro area.
 
 ## Files
 

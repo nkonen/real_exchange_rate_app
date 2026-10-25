@@ -99,7 +99,14 @@ NAME_OVERRIDES = {
 # The sidebar lets you enter your own code. You can find it with the
 # "Find non-country codes" button.
 EURO_AREA_LABEL = "Euro area"
-EURO_AREA_CODES = ("G163", "U2", "EA", "EA20", "EA19", "EMU", "EUR")
+EURO_AREA_CODES = ("EA",)
+
+# The U.S. CPI for October 2025 is missing in the IMF data.
+# For the U.S. only, the app fills it with the average of September and
+# November 2025. It fills the month only if it is missing.
+US_GAP_MONTH = pd.Timestamp("2025-10-01")
+US_GAP_BEFORE = pd.Timestamp("2025-09-01")
+US_GAP_AFTER = pd.Timestamp("2025-11-01")
 
 
 class FetchError(Exception):
@@ -233,7 +240,20 @@ def load_country(codes: tuple[str, ...]) -> pd.DataFrame:
         xdc_usd = pd.Series(1.0, index=cpi.index)
     else:
         xdc_usd = _fetch_with_codes(ER_FLOW, "{code}.XDC_USD.PA_RT.M", codes)
-    frame = pd.concat({"cpi": cpi, "xdc_usd": xdc_usd}, axis=1).sort_index()
+    cpi_imputed = pd.Series(False, index=cpi.index)
+    if codes == ("USA",) and US_GAP_MONTH not in cpi.index:
+        if US_GAP_BEFORE in cpi.index and US_GAP_AFTER in cpi.index:
+            cpi.loc[US_GAP_MONTH] = (cpi[US_GAP_BEFORE] + cpi[US_GAP_AFTER]) / 2
+            cpi_imputed.loc[US_GAP_MONTH] = True
+            cpi = cpi.sort_index()
+            cpi_imputed = cpi_imputed.sort_index()
+            if US_GAP_MONTH not in xdc_usd.index:
+                xdc_usd.loc[US_GAP_MONTH] = 1.0
+                xdc_usd = xdc_usd.sort_index()
+    frame = pd.concat(
+        {"cpi": cpi, "xdc_usd": xdc_usd, "cpi_imputed": cpi_imputed}, axis=1
+    ).sort_index()
+    frame["cpi_imputed"] = frame["cpi_imputed"].fillna(False).astype(bool)
     return frame[frame.index >= START_FLOOR]
 
 
@@ -266,6 +286,8 @@ def build_panel(df1: pd.DataFrame, df2: pd.DataFrame) -> pd.DataFrame:
     panel["xdc_usd_2"] = df2["xdc_usd"].reindex(index)
     panel["cpi_1"] = df1["cpi"].reindex(index)
     panel["cpi_2"] = df2["cpi"].reindex(index)
+    panel["cpi_1_imputed"] = df1["cpi_imputed"].reindex(index).fillna(False).astype(bool)
+    panel["cpi_2_imputed"] = df2["cpi_imputed"].reindex(index).fillna(False).astype(bool)
     # Units of country-2 currency per one unit of country-1 currency.
     panel["S"] = panel["xdc_usd_2"] / panel["xdc_usd_1"]
     panel["RER"] = panel["S"] * panel["cpi_1"] / panel["cpi_2"]
@@ -377,7 +399,7 @@ def main() -> None:
     options = build_country_options(euro_codes)
     labels = list(options)
     default1 = labels.index("United States (USA)")
-    default2 = labels.index("Germany (DEU)")
+    default2 = labels.index(EURO_AREA_LABEL)
 
     col1, col2, col3 = st.columns([1, 1, 1])
     with col1:
@@ -438,6 +460,12 @@ def main() -> None:
         "A low real index means country 1 is relatively cheap. "
         "Months with missing data appear as gaps."
     )
+    if bool(data["cpi_1_imputed"].any() or data["cpi_2_imputed"].any()):
+        st.info(
+            "U.S. CPI for October 2025 is missing in the IMF data. "
+            "The app uses the average of September and November 2025. "
+            "The CSV marks this month in the *_imputed column."
+        )
 
     export = data.rename(
         columns={
@@ -445,6 +473,8 @@ def main() -> None:
             "xdc_usd_2": f"{short2}_currency_per_USD",
             "cpi_1": f"CPI_{short1}",
             "cpi_2": f"CPI_{short2}",
+            "cpi_1_imputed": f"CPI_{short1}_imputed",
+            "cpi_2_imputed": f"CPI_{short2}_imputed",
             "S": f"S_{short2}_per_{short1}",
             "RER": "RER",
             "RER_star": "RER_star",
